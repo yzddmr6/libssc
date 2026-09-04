@@ -23,6 +23,7 @@
 #include "libssc-sensor.h"
 
 #define MAX_RETRIES 100
+#define SENSOR_SERVICE_TIMEOUT_S 30
 
 enum {
 	PROP_NAME = 1,
@@ -61,6 +62,7 @@ typedef struct _SSCSensorPrivate {
 	gboolean attr_populated;
 	gboolean service_available;
 	guint service_retries;
+	guint discovery_timeout_id;
 } SSCSensorPrivate;
 
 static void async_initable_iface_init (GAsyncInitableIface *iface);
@@ -74,6 +76,9 @@ wait_for_sensor_service (SSCSensor *self, GTask *task);
 
 static void
 discover (SSCSensor *self, GTask *task);
+
+static void
+sensor_service_discovery_timeout (gpointer user_data);
 
 static void
 attribute (SSCSensor *self, GTask *task);
@@ -300,6 +305,8 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 			ssc_suid_response__free_unpacked (suid_msg, NULL);
 			g_debug ("'registry' sensor available, discovering sensor now");
 
+			g_clear_handle_id (&priv->discovery_timeout_id, g_source_remove);
+
 			discover(ctx->sensor, ctx->task);
 			return;
 		}
@@ -311,6 +318,7 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 			/* Fail to discover when service is not available after 100s */
 			if (priv->service_retries >= MAX_RETRIES) {
 				g_clear_signal_handler (&priv->report_id, self);
+				g_clear_handle_id (&priv->discovery_timeout_id, g_source_remove);
 
 				g_set_error (&error, ssc_sensor_error_quark(), SSC_SENSOR_ERROR_NO_SERVICE,
 					     "Sensor service unavailable");
@@ -351,6 +359,7 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 			ssc_suid_response__free_unpacked (suid_msg, NULL);
 
 			g_clear_signal_handler (&priv->report_id, self);
+			g_clear_handle_id (&priv->discovery_timeout_id, g_source_remove);
 
 			g_task_return_boolean (ctx->task, FALSE);
 			g_clear_object (&ctx->task);
@@ -439,6 +448,7 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 		/* Sensor initialized, complete task and stop listening */
 		if (ctx->task) {
 			g_clear_signal_handler (&priv->report_id, self);
+			g_clear_handle_id (&priv->discovery_timeout_id, g_source_remove);
 			g_task_return_boolean (ctx->task, attributes_populated);
 			g_clear_object (&ctx->task);
 			g_slice_free (ReportReceivedContext, ctx);
@@ -466,6 +476,7 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 		/* Configuration updated, complete task and stop listening */
 		if (ctx->task) {
 			g_clear_signal_handler (&priv->report_id, self);
+			g_clear_handle_id (&priv->discovery_timeout_id, g_source_remove);
 			g_task_return_boolean (ctx->task, TRUE);
 			g_clear_object (&ctx->task);
 			g_slice_free (ReportReceivedContext, ctx);
@@ -484,6 +495,7 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 
 		if (ctx->task) {
 			g_clear_signal_handler (&priv->report_id, self);
+			g_clear_handle_id (&priv->discovery_timeout_id, g_source_remove);
 			g_task_return_boolean (ctx->task, TRUE);
 			g_clear_object (&ctx->task);
 			g_slice_free (ReportReceivedContext, ctx);
@@ -591,6 +603,29 @@ discover (SSCSensor *self, GTask *task)
 /*****************************************************************************/
 
 static void
+sensor_service_discovery_timeout (gpointer user_data)
+{
+	ReportReceivedContext *ctx = user_data;
+	SSCSensorPrivate *priv = ssc_sensor_get_instance_private (ctx->sensor);
+	GError *error = NULL;
+
+	g_return_if_fail (priv->discovery_timeout_id);
+	priv->discovery_timeout_id = 0;
+
+	g_clear_signal_handler (&priv->report_id, priv->client);
+
+	g_set_error_literal (&error, ssc_sensor_error_quark (), SSC_SENSOR_ERROR_NO_SERVICE,
+			     "Sensor service discovery timed out");
+	g_warning ("'registry' sensor timed out after %ds, is hexagonrpcd running?",
+		   SENSOR_SERVICE_TIMEOUT_S);
+	g_task_return_error (ctx->task, error);
+	g_clear_object (&ctx->task);
+	g_slice_free (ReportReceivedContext, ctx);
+}
+
+/*****************************************************************************/
+
+static void
 wait_for_sensor_service_ready (SSCClient *self, GAsyncResult *result, gpointer user_data)
 {
 	GError *error = NULL;
@@ -678,6 +713,9 @@ client_ready (SSCClient *client, GAsyncResult *result, gpointer user_data)
 	/* Wait for sensor service before discovering sensor */
 	priv->service_available = FALSE;
 	priv->service_retries = 0;
+	priv->discovery_timeout_id = g_timeout_add_seconds_once (SENSOR_SERVICE_TIMEOUT_S,
+								 sensor_service_discovery_timeout,
+								 ctx);
 	wait_for_sensor_service (self, task);
 }
 
@@ -780,6 +818,8 @@ sensor_dispose (GObject *object)
 {
 	SSCSensor *self = SSC_SENSOR (object);
 	SSCSensorPrivate *priv = ssc_sensor_get_instance_private (self);
+
+	g_clear_handle_id (&priv->discovery_timeout_id, g_source_remove);
 
 	if (priv->name)
 		g_free (priv->name);
