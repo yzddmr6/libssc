@@ -645,7 +645,7 @@ wait_for_sensor_service (SSCSensor *self, GTask *task)
 			 buf,
 			 g_task_get_cancellable (task),
 			 (GAsyncReadyCallback)wait_for_sensor_service_ready,
-			 task); 
+			 task);
 }
 
 /*****************************************************************************/
