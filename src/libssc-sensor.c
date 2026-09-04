@@ -57,7 +57,7 @@ typedef struct _SSCSensorPrivate {
 	gfloat mount_matrix[3][3];
 
 	SSCClient *client;
-	guint report_id;
+	gulong report_id;
 	gboolean attr_populated;
 	gboolean service_available;
 	guint service_retries;
@@ -310,8 +310,7 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 
 			/* Fail to discover when service is not available after 100s */
 			if (priv->service_retries >= MAX_RETRIES) {
-				g_signal_handler_disconnect (self, priv->report_id);
-				priv->report_id = 0;
+				g_clear_signal_handler (&priv->report_id, self);
 
 				g_set_error (&error, ssc_sensor_error_quark(), SSC_SENSOR_ERROR_NO_SERVICE,
 					     "Sensor service unavailable");
@@ -351,8 +350,7 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 			g_debug ("No '%s' sensor available", priv->data_type);
 			ssc_suid_response__free_unpacked (suid_msg, NULL);
 
-			g_signal_handler_disconnect (self, priv->report_id);
-			priv->report_id = 0;
+			g_clear_signal_handler (&priv->report_id, self);
 
 			g_task_return_boolean (ctx->task, FALSE);
 			g_clear_object (&ctx->task);
@@ -440,8 +438,7 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 
 		/* Sensor initialized, complete task and stop listening */
 		if (ctx->task) {
-			g_signal_handler_disconnect (self, priv->report_id);
-			priv->report_id = 0;
+			g_clear_signal_handler (&priv->report_id, self);
 			g_task_return_boolean (ctx->task, attributes_populated);
 			g_clear_object (&ctx->task);
 			g_slice_free (ReportReceivedContext, ctx);
@@ -468,8 +465,7 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 
 		/* Configuration updated, complete task and stop listening */
 		if (ctx->task) {
-			g_signal_handler_disconnect (self, priv->report_id);
-			priv->report_id = 0;
+			g_clear_signal_handler (&priv->report_id, self);
 			g_task_return_boolean (ctx->task, TRUE);
 			g_clear_object (&ctx->task);
 			g_slice_free (ReportReceivedContext, ctx);
@@ -487,8 +483,7 @@ report_received (SSCClient *self, guint32 msg_id, guint64 uid_high, guint64 uid_
 		g_debug ("Measurement received for '%s' sensor (%" G_GUINT64_FORMAT " %" G_GUINT64_FORMAT "), assuming enabled", priv->data_type, priv->uid_high, priv->uid_low);
 
 		if (ctx->task) {
-			g_signal_handler_disconnect (self, priv->report_id);
-			priv->report_id = 0;
+			g_clear_signal_handler (&priv->report_id, self);
 			g_task_return_boolean (ctx->task, TRUE);
 			g_clear_object (&ctx->task);
 			g_slice_free (ReportReceivedContext, ctx);
