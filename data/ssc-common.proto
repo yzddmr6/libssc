@@ -31,7 +31,9 @@ message SscUid {
 /* 
  * Client configuration 
  * @processor: a value from the SscProcessorType enum. Default APPS (1).
- * @suspend_mode: a value from the SscSuspendType enum. Default WAKEUP (0).
+ * @suspend_mode: a value from the SscSuspendType enum. Default WAKEUP (0);
+ *                NO_WAKEUP (1) asks the SSC not to wake the client's
+ *                processor to deliver the events of the request.
  * @no_wakeup_msg_ids: list of messages that do not cause a wakeup.
  */
 message SscClientConfig {
@@ -40,13 +42,24 @@ message SscClientConfig {
 }
 
 /*
+ * Batching of a streaming request
+ * @batch_period: how long, in microseconds, samples may be held before
+ *                they are delivered together.
+ * @flush_period: optional flush period in microseconds.
+ */
+message SscBatchSpec {
+	required uint32 batch_period = 1;
+	optional uint32 flush_period = 2;
+}
+
+/*
  * Client request body
- * @unknown: optional
+ * @batching: optional batching of a streaming request.
  * @msg: the actual sensor request, specific for each sensor.
  * @is_passive: request is passive or not. Active triggers sensor activation.
  */
 message SscClientRequestBody {
-	optional bytes unknown = 1;
+	optional SscBatchSpec batching = 1;
 	optional bytes msg = 2;
 	optional bool is_passive = 3 [default = false];
 }

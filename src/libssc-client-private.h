@@ -47,11 +47,29 @@ typedef enum {
 
 #define SSC_PROCESSOR_APSS		1
 #define SSC_SUSPEND_MODE_WAKEUP		0
+#define SSC_SUSPEND_MODE_NO_WAKEUP	1
 #define SSC_SENSOR_TYPE_SUID		"suid"
 #define SSC_SENSOR_UID_SUID_LOW		0xABABABABABABABABUL
 #define SSC_SENSOR_UID_SUID_HIGH	0xABABABABABABABABUL
 #define SSC_MSG_REQUEST_SUID		512
 #define SSC_MSG_RESPONSE_SUID		768
+
+/*
+ * How the SSC delivers the samples of a streaming request. Read once per
+ * process from SSC_SUSPEND_MODE, SSC_BATCH_PERIOD_US and SSC_FLUSH_PERIOD_US;
+ * without them, streams are delivered as wake-up events without batching.
+ */
+typedef struct {
+	gint32 suspend_mode;
+	guint32 batch_period_us;
+	guint32 flush_period_us;
+} SSCDeliveryConfig;
+
+void
+ssc_client_delivery_config_from_env (SSCDeliveryConfig *config);
+
+GArray *
+ssc_client_pack_request (const SSCDeliveryConfig *delivery, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf);
 
 void
 ssc_client_new (GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data);

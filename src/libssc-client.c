@@ -161,32 +161,103 @@ ssc_client_send_finish (SSCClient *self, GAsyncResult *res, GError **error)
 	return g_task_propagate_boolean (G_TASK (res), error);
 }
 
-void
-ssc_client_send (SSCClient *self, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
+static void
+period_from_env (const gchar *name, guint32 *period)
 {
-	GTask *task = NULL;
-	GError *error = NULL;
-	QmiMessageSscControlInput *input = NULL;
-	SSCClientPrivate *priv = NULL;
-	g_autoptr (GArray) buf = NULL;
+	const gchar *value = g_getenv (name);
+	g_autoptr (GError) error = NULL;
+	guint64 parsed;
+
+	*period = 0;
+	if (value == NULL || *value == '\0')
+		return;
+
+	if (!g_ascii_string_to_unsigned (value, 10, 1, G_MAXUINT32, &parsed, &error)) {
+		g_warning ("Ignoring %s=%s: %s", name, value, error->message);
+		return;
+	}
+
+	*period = (guint32) parsed;
+}
+
+void
+ssc_client_delivery_config_from_env (SSCDeliveryConfig *config)
+{
+	const gchar *mode = g_getenv ("SSC_SUSPEND_MODE");
+
+	config->suspend_mode = SSC_SUSPEND_MODE_WAKEUP;
+	if (mode != NULL && *mode != '\0') {
+		if (g_str_equal (mode, "nowakeup"))
+			config->suspend_mode = SSC_SUSPEND_MODE_NO_WAKEUP;
+		else if (!g_str_equal (mode, "wakeup"))
+			g_warning ("Ignoring SSC_SUSPEND_MODE=%s: expected wakeup or nowakeup", mode);
+	}
+
+	period_from_env ("SSC_BATCH_PERIOD_US", &config->batch_period_us);
+	period_from_env ("SSC_FLUSH_PERIOD_US", &config->flush_period_us);
+	if (config->flush_period_us && !config->batch_period_us) {
+		g_warning ("Ignoring SSC_FLUSH_PERIOD_US without SSC_BATCH_PERIOD_US");
+		config->flush_period_us = 0;
+	}
+}
+
+static const SSCDeliveryConfig *
+delivery_config (void)
+{
+	static SSCDeliveryConfig config;
+	static gsize initialized = 0;
+
+	if (g_once_init_enter (&initialized)) {
+		ssc_client_delivery_config_from_env (&config);
+		if (config.suspend_mode != SSC_SUSPEND_MODE_WAKEUP || config.batch_period_us)
+			g_message ("Streaming requests: %s delivery, batch period %" G_GUINT32_FORMAT
+				   " us, flush period %" G_GUINT32_FORMAT " us",
+				   config.suspend_mode == SSC_SUSPEND_MODE_NO_WAKEUP ? "no-wakeup" : "wakeup",
+				   config.batch_period_us, config.flush_period_us);
+		g_once_init_leave (&initialized, 1);
+	}
+
+	return &config;
+}
+
+/*
+ * Only the requests that start a stream carry the configured delivery;
+ * discovery, attribute and disable requests keep wake-up delivery. Batching
+ * applies to continuous streams only.
+ */
+GArray *
+ssc_client_pack_request (const SSCDeliveryConfig *delivery, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf)
+{
+	GArray *buf = NULL;
 	SscClientRequestBody body_msg;
 	SscClientConfig config_msg;
 	SscClientRequest client_msg;
+	SscBatchSpec batch_msg;
 	SscUid uid_msg;
+	gboolean streaming = message_id == SSC_MSG_REQUEST_ENABLE_REPORT_CONTINUOUS ||
+			     message_id == SSC_MSG_REQUEST_ENABLE_REPORT_ON_CHANGE;
 
-	task = g_task_new (self, cancellable, callback, user_data);
 	buf = g_array_new (FALSE, FALSE, 1);
-	priv = ssc_client_get_instance_private (self);
 
 	ssc_client_config__init (&config_msg);
 	config_msg.processor = SSC_PROCESSOR_APSS;
-	config_msg.suspend_mode = SSC_SUSPEND_MODE_WAKEUP;
+	config_msg.suspend_mode = streaming ? delivery->suspend_mode : SSC_SUSPEND_MODE_WAKEUP;
 
 	ssc_client_request_body__init (&body_msg);
 	if (protobuf) {
 		body_msg.has_msg = true;
 		body_msg.msg.data = (uint8_t *)protobuf->data;
 		body_msg.msg.len = protobuf->len;
+	}
+
+	if (message_id == SSC_MSG_REQUEST_ENABLE_REPORT_CONTINUOUS && delivery->batch_period_us) {
+		ssc_batch_spec__init (&batch_msg);
+		batch_msg.batch_period = delivery->batch_period_us;
+		if (delivery->flush_period_us) {
+			batch_msg.has_flush_period = true;
+			batch_msg.flush_period = delivery->flush_period_us;
+		}
+		body_msg.batching = &batch_msg;
 	}
 
 	ssc_uid__init (&uid_msg);
@@ -201,6 +272,22 @@ ssc_client_send (SSCClient *self, guint64 uid_high, guint64 uid_low, guint32 mes
 
 	g_array_set_size (buf, ssc_client_request__get_packed_size (&client_msg));
 	ssc_client_request__pack (&client_msg, (unsigned char*) buf->data);
+
+	return buf;
+}
+
+void
+ssc_client_send (SSCClient *self, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
+{
+	GTask *task = NULL;
+	GError *error = NULL;
+	QmiMessageSscControlInput *input = NULL;
+	SSCClientPrivate *priv = NULL;
+	g_autoptr (GArray) buf = NULL;
+
+	task = g_task_new (self, cancellable, callback, user_data);
+	priv = ssc_client_get_instance_private (self);
+	buf = ssc_client_pack_request (delivery_config (), uid_high, uid_low, message_id, protobuf);
 
 	if (buf == NULL) {
 		g_set_error (&error, ssc_client_error_quark(), SSC_CLIENT_ERROR_PROTOBUF,

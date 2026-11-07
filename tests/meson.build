@@ -93,3 +93,11 @@ if not (family == 'arm' and cpu != 'arm64')
   )
 
 endif
+
+# Request encoding only; runs without the mock SSC server.
+test(
+  'tests-delivery',
+  executable('tests-delivery', 'delivery.c', sources, dependencies: deps),
+  protocol: 'exitcode',
+  suite: 'delivery',
+)
