@@ -185,11 +185,13 @@ ssc_client_delivery_config_from_env (SSCDeliveryConfig *config)
 {
 	const gchar *mode = g_getenv ("SSC_SUSPEND_MODE");
 
-	config->suspend_mode = SSC_SUSPEND_MODE_WAKEUP;
+	config->suspend_mode = SSC_SUSPEND_MODE_BY_SENSOR_TYPE;
 	if (mode != NULL && *mode != '\0') {
 		if (g_str_equal (mode, "nowakeup"))
 			config->suspend_mode = SSC_SUSPEND_MODE_NO_WAKEUP;
-		else if (!g_str_equal (mode, "wakeup"))
+		else if (g_str_equal (mode, "wakeup"))
+			config->suspend_mode = SSC_SUSPEND_MODE_WAKEUP;
+		else
 			g_warning ("Ignoring SSC_SUSPEND_MODE=%s: expected wakeup or nowakeup", mode);
 	}
 
@@ -201,19 +203,49 @@ ssc_client_delivery_config_from_env (SSCDeliveryConfig *config)
 	}
 }
 
+/*
+ * Motion and orientation streams: the accelerometer, gyroscope, magnetometer
+ * and rotation vector sample continuously, and their samples are only of use
+ * to a reader that is awake anyway (screen rotation, compass). Asking for
+ * wake-up delivery makes the SSC signal the application processor for every
+ * sample, as for an Android wake-up sensor. Every other type keeps wake-up
+ * delivery: proximity and the event sensors (significant motion, hall,
+ * gestures) exist to wake the system, and a type this list does not name
+ * keeps the behaviour libssc always had.
+ */
+static const gchar * const no_wakeup_data_types[] = {
+	"accel",
+	"gyro",
+	"mag",
+	"rotv",
+};
+
+gint32
+ssc_client_default_suspend_mode (const gchar *data_type)
+{
+	for (gsize i = 0; data_type && i < G_N_ELEMENTS (no_wakeup_data_types); i++)
+		if (g_str_equal (data_type, no_wakeup_data_types[i]))
+			return SSC_SUSPEND_MODE_NO_WAKEUP;
+
+	return SSC_SUSPEND_MODE_WAKEUP;
+}
+
+void
+ssc_client_delivery_for_sensor (const SSCDeliveryConfig *overrides, const gchar *data_type, SSCDeliveryConfig *delivery)
+{
+	*delivery = *overrides;
+	if (delivery->suspend_mode == SSC_SUSPEND_MODE_BY_SENSOR_TYPE)
+		delivery->suspend_mode = ssc_client_default_suspend_mode (data_type);
+}
+
 static const SSCDeliveryConfig *
-delivery_config (void)
+delivery_overrides (void)
 {
 	static SSCDeliveryConfig config;
 	static gsize initialized = 0;
 
 	if (g_once_init_enter (&initialized)) {
 		ssc_client_delivery_config_from_env (&config);
-		if (config.suspend_mode != SSC_SUSPEND_MODE_WAKEUP || config.batch_period_us)
-			g_message ("Streaming requests: %s delivery, batch period %" G_GUINT32_FORMAT
-				   " us, flush period %" G_GUINT32_FORMAT " us",
-				   config.suspend_mode == SSC_SUSPEND_MODE_NO_WAKEUP ? "no-wakeup" : "wakeup",
-				   config.batch_period_us, config.flush_period_us);
 		g_once_init_leave (&initialized, 1);
 	}
 
@@ -276,8 +308,8 @@ ssc_client_pack_request (const SSCDeliveryConfig *delivery, guint64 uid_high, gu
 	return buf;
 }
 
-void
-ssc_client_send (SSCClient *self, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
+static void
+send_request (SSCClient *self, const SSCDeliveryConfig *delivery, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
 {
 	GTask *task = NULL;
 	GError *error = NULL;
@@ -287,7 +319,7 @@ ssc_client_send (SSCClient *self, guint64 uid_high, guint64 uid_low, guint32 mes
 
 	task = g_task_new (self, cancellable, callback, user_data);
 	priv = ssc_client_get_instance_private (self);
-	buf = ssc_client_pack_request (delivery_config (), uid_high, uid_low, message_id, protobuf);
+	buf = ssc_client_pack_request (delivery, uid_high, uid_low, message_id, protobuf);
 
 	if (buf == NULL) {
 		g_set_error (&error, ssc_client_error_quark(), SSC_CLIENT_ERROR_PROTOBUF,
@@ -325,6 +357,37 @@ ssc_client_send (SSCClient *self, guint64 uid_high, guint64 uid_low, guint32 mes
 		task);
 
 	qmi_message_ssc_control_input_unref (input);
+}
+
+/*
+ * Requests that are not about one sensor type: a streaming request sent this
+ * way is delivered as the overrides say, and otherwise with wake-up delivery.
+ */
+void
+ssc_client_send (SSCClient *self, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
+{
+	ssc_client_send_for_sensor (self, NULL, uid_high, uid_low, message_id, protobuf, cancellable, callback, user_data);
+}
+
+void
+ssc_client_send_for_sensor (SSCClient *self, const gchar *data_type, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data)
+{
+	const SSCDeliveryConfig *overrides = delivery_overrides ();
+	SSCDeliveryConfig delivery;
+
+	ssc_client_delivery_for_sensor (overrides, data_type, &delivery);
+	if (message_id == SSC_MSG_REQUEST_ENABLE_REPORT_CONTINUOUS ||
+	    message_id == SSC_MSG_REQUEST_ENABLE_REPORT_ON_CHANGE)
+		g_message ("Streaming '%s' requests: %s delivery (%s), batch period %" G_GUINT32_FORMAT
+			   " us, flush period %" G_GUINT32_FORMAT " us",
+			   data_type ? data_type : "unknown",
+			   delivery.suspend_mode == SSC_SUSPEND_MODE_NO_WAKEUP ? "no-wakeup" : "wakeup",
+			   overrides->suspend_mode == SSC_SUSPEND_MODE_BY_SENSOR_TYPE ?
+				"default for the sensor type" : "SSC_SUSPEND_MODE",
+			   message_id == SSC_MSG_REQUEST_ENABLE_REPORT_CONTINUOUS ? delivery.batch_period_us : 0,
+			   message_id == SSC_MSG_REQUEST_ENABLE_REPORT_CONTINUOUS ? delivery.flush_period_us : 0);
+
+	send_request (self, &delivery, uid_high, uid_low, message_id, protobuf, cancellable, callback, user_data);
 }
 
 /*****************************************************************************/

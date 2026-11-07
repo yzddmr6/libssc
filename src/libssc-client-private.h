@@ -54,10 +54,15 @@ typedef enum {
 #define SSC_MSG_REQUEST_SUID		512
 #define SSC_MSG_RESPONSE_SUID		768
 
+/* Not a wire value: the delivery follows the sensor type. */
+#define SSC_SUSPEND_MODE_BY_SENSOR_TYPE	-1
+
 /*
- * How the SSC delivers the samples of a streaming request. Read once per
- * process from SSC_SUSPEND_MODE, SSC_BATCH_PERIOD_US and SSC_FLUSH_PERIOD_US;
- * without them, streams are delivered as wake-up events without batching.
+ * How the SSC delivers the samples of a streaming request. The delivery type
+ * defaults per sensor type (ssc_client_default_suspend_mode); streams are not
+ * batched by default. SSC_SUSPEND_MODE, SSC_BATCH_PERIOD_US and
+ * SSC_FLUSH_PERIOD_US, read once per process, override both for every
+ * streaming request of the process.
  */
 typedef struct {
 	gint32 suspend_mode;
@@ -67,6 +72,12 @@ typedef struct {
 
 void
 ssc_client_delivery_config_from_env (SSCDeliveryConfig *config);
+
+gint32
+ssc_client_default_suspend_mode (const gchar *data_type);
+
+void
+ssc_client_delivery_for_sensor (const SSCDeliveryConfig *overrides, const gchar *data_type, SSCDeliveryConfig *delivery);
 
 GArray *
 ssc_client_pack_request (const SSCDeliveryConfig *delivery, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf);
@@ -79,6 +90,9 @@ ssc_client_new_finish (GAsyncResult *res, GError **error);
 
 void
 ssc_client_send (SSCClient *self, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data); 
+
+void
+ssc_client_send_for_sensor (SSCClient *self, const gchar *data_type, guint64 uid_high, guint64 uid_low, guint32 message_id, GArray *protobuf, GCancellable *cancellable, GAsyncReadyCallback callback, gpointer user_data);
 
 gboolean
 ssc_client_send_finish (SSCClient *self, GAsyncResult *res, GError **error);

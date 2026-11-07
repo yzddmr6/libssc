@@ -241,14 +241,16 @@ sensor_open (SSCSensor *self, GCancellable *cancellable, GAsyncReadyCallback cal
 			G_CALLBACK (report_received),
 			ctx);
 
-	ssc_client_send (priv->client,
-			 priv->uid_high,
-			 priv->uid_low,
-			 msg_id,
-			 buf,
-			 g_task_get_cancellable (task),
-			 (GAsyncReadyCallback)sensor_open_ready,
-			 task);
+	/* The delivery of the stream depends on the sensor type */
+	ssc_client_send_for_sensor (priv->client,
+				    priv->data_type,
+				    priv->uid_high,
+				    priv->uid_low,
+				    msg_id,
+				    buf,
+				    g_task_get_cancellable (task),
+				    (GAsyncReadyCallback)sensor_open_ready,
+				    task);
 }
 
 gboolean
