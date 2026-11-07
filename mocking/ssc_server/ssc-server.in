@@ -328,7 +328,7 @@ if __name__ == '__main__':
             p.start()
 
         code = ERROR_OK
-        code = os.system(args.test)
+        code = os.waitstatus_to_exitcode(os.system(args.test))
         if code != 0:
             print(f'❌ Test {args.test} finished with exit code {code}')
 
